@@ -1,6 +1,22 @@
+/**
+ * Capture Service — orchestrates promise capture from raw text.
+ *
+ * Flow: raw text → PromiseParser (LLM or regex) → store → confirmation
+ *
+ * @example
+ * ```ts
+ * const store = new CsvPromiseStore('data/promises.csv');
+ * const parser = new PromiseParser(myLlmProvider);
+ * const service = new CaptureService(store, parser);
+ *
+ * const result = await service.capture("Send contract to John by Friday");
+ * console.log(result.message); // 'Tracked: "send contract" → John due 2026-02-28 ✓'
+ * ```
+ */
+
 import { randomUUID } from 'node:crypto';
 import type { TrackedPromise, PromiseStore } from '../types.js';
-import { parsePromise } from './parser.js';
+import { PromiseParser, type LlmProvider } from './parser.js';
 
 export interface CaptureResult {
   promise: TrackedPromise;
@@ -9,10 +25,29 @@ export interface CaptureResult {
 }
 
 export class CaptureService {
-  constructor(private store: PromiseStore) {}
+  private parser: PromiseParser;
 
+  /**
+   * @param store - Storage backend implementing PromiseStore
+   * @param parserOrLlm - A PromiseParser instance, an LlmProvider, or omit for regex fallback
+   */
+  constructor(
+    private store: PromiseStore,
+    parserOrLlm?: PromiseParser | LlmProvider,
+  ) {
+    if (parserOrLlm instanceof PromiseParser) {
+      this.parser = parserOrLlm;
+    } else {
+      this.parser = new PromiseParser(parserOrLlm);
+    }
+  }
+
+  /**
+   * Capture a promise from raw natural language text.
+   * Parses, stores, and returns a confirmation message.
+   */
   async capture(rawText: string, referenceDate: Date = new Date()): Promise<CaptureResult> {
-    const parsed = parsePromise(rawText, referenceDate);
+    const parsed = await this.parser.parse(rawText, referenceDate);
 
     const promise: TrackedPromise = {
       id: randomUUID(),
@@ -34,6 +69,7 @@ export class CaptureService {
     return { promise, message, needsDate };
   }
 
+  /** Update the due date for a previously captured promise. */
   async setDueDate(id: string, dueDate: string): Promise<void> {
     await this.store.update(id, { dueDate });
   }

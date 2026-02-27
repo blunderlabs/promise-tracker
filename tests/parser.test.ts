@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { parsePromise, parseDate } from '../src/capture/parser.js';
+import { describe, it, expect, vi } from 'vitest';
+import { parsePromise, parseDate, PromiseParser, type LlmProvider } from '../src/capture/parser.js';
 
 const REF = new Date('2026-02-27T12:00:00Z');
 
@@ -9,12 +9,10 @@ describe('parseDate', () => {
   });
 
   it('parses "next Friday"', () => {
-    // 2026-02-27 is a Friday, so next Friday = 2026-03-06
     expect(parseDate('by next friday', REF)).toBe('2026-03-06');
   });
 
   it('parses "Feb 25"', () => {
-    // Feb 25 2026 is past ref date, so bumps to 2027
     expect(parseDate('by Feb 25', REF)).toBe('2027-02-25');
   });
 
@@ -35,7 +33,7 @@ describe('parseDate', () => {
   });
 });
 
-describe('parsePromise', () => {
+describe('parsePromise (regex fallback)', () => {
   it('extracts what, who, dueDate from full sentence', () => {
     const r = parsePromise('Promised to send contract to John by Mar 15', REF);
     expect(r.who).toBe('John');
@@ -59,5 +57,70 @@ describe('parsePromise', () => {
     const r = parsePromise('Send report to John', REF);
     expect(r.who).toBe('John');
     expect(r.dueDate).toBeNull();
+  });
+});
+
+describe('PromiseParser (LLM-powered)', () => {
+  it('uses LLM provider when available', async () => {
+    const mockLlm: LlmProvider = {
+      complete: vi.fn().mockResolvedValue(JSON.stringify({
+        what: 'send contract',
+        who: 'John',
+        dueDate: '2026-03-15',
+      })),
+    };
+
+    const parser = new PromiseParser(mockLlm);
+    const result = await parser.parse('Promised to send contract to John by Mar 15', REF);
+
+    expect(result.what).toBe('send contract');
+    expect(result.who).toBe('John');
+    expect(result.dueDate).toBe('2026-03-15');
+    expect(mockLlm.complete).toHaveBeenCalledOnce();
+  });
+
+  it('handles LLM response wrapped in markdown code block', async () => {
+    const mockLlm: LlmProvider = {
+      complete: vi.fn().mockResolvedValue('```json\n{"what": "buy groceries", "who": "self", "dueDate": null}\n```'),
+    };
+
+    const parser = new PromiseParser(mockLlm);
+    const result = await parser.parse('Buy groceries', REF);
+
+    expect(result.what).toBe('buy groceries');
+    expect(result.who).toBe('self');
+    expect(result.dueDate).toBeNull();
+  });
+
+  it('falls back to regex when LLM fails', async () => {
+    const mockLlm: LlmProvider = {
+      complete: vi.fn().mockRejectedValue(new Error('API error')),
+    };
+
+    const parser = new PromiseParser(mockLlm);
+    const result = await parser.parse('Send report to John by tomorrow', REF);
+
+    expect(result.who).toBe('John');
+    expect(result.dueDate).toBe('2026-02-28');
+  });
+
+  it('falls back to regex when LLM returns invalid JSON', async () => {
+    const mockLlm: LlmProvider = {
+      complete: vi.fn().mockResolvedValue('I cannot parse this'),
+    };
+
+    const parser = new PromiseParser(mockLlm);
+    const result = await parser.parse('Send report by tomorrow', REF);
+
+    expect(result.who).toBe('self');
+    expect(result.dueDate).toBe('2026-02-28');
+  });
+
+  it('uses regex fallback when no LLM provider given', async () => {
+    const parser = new PromiseParser();
+    const result = await parser.parse('Follow up with Sarah by next friday', REF);
+
+    expect(result.who).toBe('Sarah');
+    expect(result.dueDate).toBe('2026-03-06');
   });
 });
